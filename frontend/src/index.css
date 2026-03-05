@@ -1,0 +1,171 @@
+/* NovaPulse Dark Space Theme */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-card: #12121a;
+  --bg-border: #1e1e2e;
+  --text-primary: #e0e0f0;
+  --text-secondary: #8888aa;
+  --accent-blue: #00bfff;
+  --accent-gold: #ffd700;
+  --accent-green: #00e676;
+  --accent-red: #ff1744;
+  --font: 'Courier New', monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+a { color: var(--accent-blue); text-decoration: none; }
+
+button {
+  background: var(--bg-border);
+  color: var(--text-primary);
+  border: 1px solid var(--accent-blue);
+  padding: 6px 14px;
+  cursor: pointer;
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 12px;
+  transition: background 0.2s;
+}
+button:hover { background: var(--accent-blue); color: #000; }
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--bg-border);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.tag-green { color: var(--accent-green); }
+.tag-red { color: var(--accent-red); }
+.tag-gold { color: var(--accent-gold); }
+.tag-blue { color: var(--accent-blue); }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--bg-border); }
+th { color: var(--text-secondary); font-size: 11px; text-transform: uppercase; }
+
+.loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--accent-blue); }
+
+/* ── Dashboard layout ─────────────────────────────────────── */
+
+.dash-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/*
+  Two-column flex layout:
+    Left  (flex:1): chart on top, orders+trades on bottom
+    Right (340px) : signal panel on top, sidebar below
+*/
+.dash-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  padding: 6px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Left column ── */
+.dash-left {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dash-chart {
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+  position: relative;
+}
+
+.dash-bottom {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  min-height: 0;
+}
+
+.dash-orders,
+.dash-trades {
+  flex: 1;
+  overflow: auto;
+  min-width: 0;
+}
+
+/* Inner cards fill their flex cells */
+.dash-orders > .card,
+.dash-trades > .card {
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+/* ── Right column ── */
+.dash-right {
+  flex: 0 0 340px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dash-signal {
+  flex: 1 1 0;
+  overflow: auto;
+  min-height: 0;
+}
+
+/* Make SignalPanel's card fill the flex cell */
+.dash-signal > .card {
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.dash-sidebar {
+  flex: 0 0 230px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Sidebar cards never squish */
+.dash-sidebar > .card { flex-shrink: 0; }
+
+/* Status bar at the very bottom */
+.dash-statusbar {
+  flex-shrink: 0;
+  border-top: 1px solid var(--bg-border);
+}
+
+/* Scrollbar styling */
+.dash-sidebar::-webkit-scrollbar,
+.dash-signal::-webkit-scrollbar  { width: 4px; }
+.dash-sidebar::-webkit-scrollbar-track,
+.dash-signal::-webkit-scrollbar-track  { background: transparent; }
+.dash-sidebar::-webkit-scrollbar-thumb,
+.dash-signal::-webkit-scrollbar-thumb  { background: var(--bg-border); border-radius: 2px; }

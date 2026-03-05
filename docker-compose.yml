@@ -1,0 +1,70 @@
+version: '3.8'
+
+networks:
+  novapulse_net:
+    driver: bridge
+
+services:
+  mongodb:
+    image: mongo:6
+    container_name: novapulse_mongo
+    # 27018 on host avoids clash with any existing MongoDB on 27017
+    ports:
+      - '127.0.0.1:27018:27017'
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - novapulse_net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: novapulse_redis
+    # 6380 on host avoids clash with any existing Redis on 6379
+    ports:
+      - '127.0.0.1:6380:6379'
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - novapulse_net
+    restart: unless-stopped
+
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: novapulse_ml
+    # Internal only — backend reaches it via Docker DNS, not exposed to host
+    expose:
+      - '5001'
+    env_file: .env
+    volumes:
+      - ./ml-service/model:/app/model
+      - ./ml-service/data:/app/data
+    depends_on:
+      - mongodb
+    networks:
+      - novapulse_net
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: novapulse_backend
+    # 3100 on host (localhost only) — Nginx proxies to this, avoids port 3000 clash
+    ports:
+      - '127.0.0.1:3100:3000'
+    env_file: .env
+    depends_on:
+      - mongodb
+      - redis
+      - ml-service
+    networks:
+      - novapulse_net
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  redis_data:
