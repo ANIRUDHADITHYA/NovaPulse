@@ -8,7 +8,7 @@ import ta
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT"]
 LABEL_HORIZON = 4   # candles
 LABEL_TARGET = 0.008  # 0.8% price move
 

@@ -1,7 +1,7 @@
 'use strict';
 
 // Trading config
-module.exports.SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
+module.exports.SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'HYPEUSDT'];
 module.exports.CANDLE_INTERVAL = '15m';
 module.exports.ML_THRESHOLD = 0.72;
 module.exports.TAKE_PROFIT_PCT = 0.015; // 1.5% — 3:1 R:R vs 0.5% SL
