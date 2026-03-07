@@ -45,6 +45,9 @@ const PORT = process.env.PORT || 3000;
 const app = express();
 const server = http.createServer(app);
 
+// Trust Nginx reverse proxy so express-rate-limit gets the real client IP
+app.set('trust proxy', 1);
+
 // ─── Middleware (order matters) ───────────────────────────
 app.use(helmet());
 app.use(cors({ origin: [process.env.CORS_ORIGIN, 'http://localhost:5173', 'http://localhost:5174'], credentials: true }));
