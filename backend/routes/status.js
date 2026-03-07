@@ -101,6 +101,55 @@ router.get('/status', auth, async (req, res) => {
   // MongoDB
   const mongoOk = mongoose.connection.readyState === 1;
 
+  // ── AI Layer 6 (OpenAI / Claude) ──────────────────────────────────────────
+  const provider   = (process.env.AI_PROVIDER || '').toLowerCase();
+  const aiModel    = process.env.AI_MODEL || (provider === 'claude' ? 'claude-3-5-haiku-20241022' : 'gpt-4o-mini');
+  const aiKeySet   = provider === 'claude'
+    ? !!process.env.ANTHROPIC_API_KEY
+    : !!process.env.OPENAI_API_KEY;
+
+  const [aiPromptRaw, aiCompletionRaw, aiCallsRaw, aiLastCallRaw, aiCounterTtlRaw] = await Promise.all([
+    redisClient.get('ai_tokens_today:prompt'),
+    redisClient.get('ai_tokens_today:completion'),
+    redisClient.get('ai_calls_today'),
+    redisClient.get('ai_last_call'),
+    redisClient.ttl('ai_tokens_today:prompt'),
+  ]);
+
+  const aiPromptTokens     = parseInt(aiPromptRaw     || '0', 10);
+  const aiCompletionTokens = parseInt(aiCompletionRaw || '0', 10);
+  const aiCallsToday       = parseInt(aiCallsRaw      || '0', 10);
+  const aiTotalTokens      = aiPromptTokens + aiCompletionTokens;
+
+  // Per-model cost estimates (USD per 1M tokens)
+  const COST_TABLE = {
+    'gpt-4o-mini':              { inp: 0.150,  out: 0.600  },
+    'gpt-4o':                   { inp: 2.50,   out: 10.00  },
+    'claude-3-5-haiku-20241022':{ inp: 0.80,   out: 4.00   },
+    'claude-3-5-sonnet-20241022':{ inp: 3.00,  out: 15.00  },
+  };
+  const costRow = COST_TABLE[aiModel] || { inp: 0, out: 0 };
+  const aiCostToday = (
+    (aiPromptTokens     / 1_000_000) * costRow.inp +
+    (aiCompletionTokens / 1_000_000) * costRow.out
+  );
+
+  const ai = {
+    ok:               !!provider && aiKeySet,
+    configured:       !!provider,
+    keySet:           aiKeySet,
+    provider:         provider || 'none',
+    model:            aiModel,
+    callsToday:       aiCallsToday,
+    promptTokens:     aiPromptTokens,
+    completionTokens: aiCompletionTokens,
+    totalTokens:      aiTotalTokens,
+    costUsdToday:     parseFloat(aiCostToday.toFixed(6)),
+    lastCall:         aiLastCallRaw || null,
+    counterResetsIn:  redisTtlToAge(aiCounterTtlRaw),
+    error:            !provider ? 'AI_PROVIDER not set' : !aiKeySet ? 'API key missing' : null,
+  };
+
   res.json({
     ts: new Date().toISOString(),
     services: {
@@ -116,6 +165,7 @@ router.get('/status', auth, async (req, res) => {
       fearGreed: { label: 'Fear & Greed', plan: 'Free (alternative.me)', ...fng },
       cryptoCompareNews: { label: 'CryptoCompare News', plan: 'Free', ...cryptoCompare },
       mongodb: { label: 'MongoDB', ok: mongoOk, plan: 'Local' },
+      ai: { label: 'AI Layer 6', ...ai },
     },
   });
 });

@@ -6,6 +6,7 @@ const indicators = require('./indicators');
 const oi = require('./oi');
 const taapi = require('./taapi');
 const sentiment = require('./sentiment');
+const aiSignal = require('./aiSignal');
 const Signal = require('../models/Signal');
 const emitter = require('../socket/emitter');
 
@@ -23,20 +24,21 @@ function scoreLayer1(ind) {
   let bullish = 0;
   let bearish = 0;
 
-  // RSI — bullish: oversold (<40) OR rising momentum (50-70 range)
-  //         bearish: overbought (>75)
-  if (ind.rsi < 40 || (ind.rsi >= 50 && ind.rsi <= 70)) bullish++;
-  else if (ind.rsi > 75) bearish++;
+  // RSI — bullish: oversold (<40) OR confirmed upward momentum (55-70)
+  //         bearish: overbought (>70) — tightened from 75 to avoid late entries
+  if (ind.rsi < 40 || (ind.rsi >= 55 && ind.rsi <= 70)) bullish++;
+  else if (ind.rsi > 70) bearish++;
 
-  // EMA crossover
-  if (ind.emaCross9_21 === 'bullish') bullish++;
-  else if (ind.emaCross9_21 === 'bearish') bearish++;
+  // EMA trend alignment — checks ongoing trend, not just the crossover event
+  // emaCross9_21 === 'bullish' only fires on 1 candle; EMA stack fires every candle in a trend
+  if (ind.ema9 > ind.ema21 && ind.ema21 > ind.ema50) bullish++;
+  else if (ind.ema9 < ind.ema21 && ind.ema21 < ind.ema50) bearish++;
 
   // MACD
   if (ind.macdHistogram > 0) bullish++;
   else if (ind.macdHistogram < 0) bearish++;
 
-  // Bollinger + volume
+  // Bollinger squeeze breakout + volume surge
   if (ind.bbSqueeze && ind.volumeRatio > 1.5) bullish++;
 
   return bullish > bearish ? 1 : bearish > bullish ? -1 : 0;
@@ -76,7 +78,8 @@ async function evaluate(symbol) {
 
   // Layer 2 — OI + Funding Rate
   const oiData = await oi.getLatestOI(symbol);
-  const priceRising = ind.emaCross9_21 === 'bullish';
+  // Use EMA9 > EMA21 (trend alignment) — crossover only fires once per trend, not every candle
+  const priceRising = ind.ema9 > ind.ema21;
   const layer2 = oi.scoreOI(oiData, priceRising);
 
   // Layer 3 — Taapi
@@ -124,7 +127,8 @@ async function evaluate(symbol) {
       const mlRes = await axios2.post(`${process.env.ML_SERVICE_URL}/predict`, features, { timeout: 5000 });
       mlConfidence = mlRes.data.score;
       if (mlRes.data.fallback) {
-        layer5 = 0; // abstain on fallback — no trained model yet
+        layer5 = 0;        // abstain on fallback — no trained model yet
+        mlConfidence = null; // don't surface fallback 0.50 as a real score
       } else {
         layer5 = mlConfidence >= parseFloat(process.env.ML_CONFIDENCE_THRESHOLD || '0.72') ? 1 : -1;
       }
@@ -144,15 +148,56 @@ async function evaluate(symbol) {
   if (allBullish) finalSignal = 'BUY';
   else if (allBearish) finalSignal = 'SELL';
 
+  // ── Layer 6: AI chart-pattern confirmation ──────────────────────────────────
+  // Only invoked when layers 1-5 agree on a directional trade (saves API calls).
+  // If the AI disagrees or is offline, we treat it as VETO or abstain respectively.
+  let layer6 = 0;
+  let aiResult = null; // { signal, entry, sl, tp, rr, pattern, reason }
+
+  if (finalSignal === 'BUY' || finalSignal === 'SELL') {
+    // Read raw candles from Redis for AI pattern analysis
+    const raw = await redisClient.lrange(REDIS_KEYS.CANDLE_BUFFER(symbol), 0, -1);
+    const candles = raw.map((s) => JSON.parse(s));
+
+    const layerSummary =
+      `L1:${layer1} L2:${layer2} L3:${layer3} L4:${layer4} L5:${layer5} ML:${mlConfidence ?? 'N/A'}`;
+
+    aiResult = await aiSignal.analyze(symbol, candles, ind, oiData, sentimentData, layerSummary);
+
+    if (aiResult !== null) {
+      // AI responded — honour its verdict
+      if (aiResult.signal === finalSignal) {
+        layer6 = 1;  // confirms direction
+      } else {
+        layer6 = -1; // AI disagrees → veto
+        logger.warn(
+          `[Signal] ${symbol} — Layer 6 AI VETO: engine=${finalSignal} AI=${aiResult.signal} ` +
+          `(${aiResult.reason})`
+        );
+        await saveAndEmit(
+          symbol, layer1, layer2, layer3, layer4, layer5,
+          mlConfidence, mlOffline, 'NEUTRAL', true, 'AI_VETO',
+          layer6, aiResult
+        );
+        return;
+      }
+    } else {
+      // AI offline — abstain; don't block trade
+      layer6 = 0;
+      logger.info(`[Signal] ${symbol} — Layer 6 offline, proceeding without AI levels`);
+    }
+  }
 
   await saveAndEmit(
-    symbol, layer1, layer2, layer3, layer4, layer5, mlConfidence, mlOffline, finalSignal, false, null
+    symbol, layer1, layer2, layer3, layer4, layer5,
+    mlConfidence, mlOffline, finalSignal, false, null,
+    layer6, aiResult
   );
 
   // Route BUY to Order Manager; SELL to dashboard only
   if (finalSignal === 'BUY') {
     const orderManager = require('./orderManager');
-    await orderManager.onBuySignal(symbol, ind.currentPrice, mlConfidence);
+    await orderManager.onBuySignal(symbol, ind.currentPrice, mlConfidence, aiResult);
   }
 }
 
@@ -179,7 +224,9 @@ function buildMLFeatures(ind, oiData, sentimentData, taapiData) {
 }
 
 async function saveAndEmit(
-  symbol, layer1, layer2, layer3, layer4, layer5, mlConfidence, mlOffline, finalSignal, vetoed, vetoReason
+  symbol, layer1, layer2, layer3, layer4, layer5,
+  mlConfidence, mlOffline, finalSignal, vetoed, vetoReason,
+  layer6 = 0, aiResult = null
 ) {
   const ts = new Date();
   const doc = {
@@ -190,11 +237,19 @@ async function saveAndEmit(
     layer3Score: typeof layer3 === 'number' ? layer3 : null,
     layer4Score: typeof layer4 === 'number' ? layer4 : null,
     layer5Score: typeof layer5 === 'number' ? layer5 : null,
+    layer6Score: typeof layer6 === 'number' ? layer6 : null,
     mlConfidence: mlConfidence ?? null,
     mlOffline: !!mlOffline,
     finalSignal,
     vetoed: !!vetoed,
     vetoReason: vetoReason ?? null,
+    aiSignal: aiResult?.signal ?? null,
+    aiEntry:  aiResult?.entry  ?? null,
+    aiSl:     aiResult?.sl     ?? null,
+    aiTp:     aiResult?.tp     ?? null,
+    aiRr:     aiResult?.rr     ?? null,
+    aiPattern: aiResult?.pattern ?? null,
+    aiReason:  aiResult?.reason  ?? null,
   };
 
   try {
@@ -217,7 +272,7 @@ async function saveAndEmit(
     finalSignal === 'SELL' ? 'signal:sell' : 'signal:neutral';
 
   emitter.emit(event, payload);
-  logger.info(`[Signal] ${symbol} → ${finalSignal} | L1:${layer1} L2:${layer2} L3:${layer3} L4:${layer4} L5:${layer5} ML:${mlConfidence} | vetoed:${vetoed} reason:${vetoReason}`);
+  logger.info(`[Signal] ${symbol} → ${finalSignal} | L1:${layer1} L2:${layer2} L3:${layer3} L4:${layer4} L5:${layer5} L6:${layer6} ML:${mlConfidence} | vetoed:${vetoed} reason:${vetoReason} | AI:${aiResult?.signal ?? 'N/A'} pattern:${aiResult?.pattern ?? '-'}`);
 }
 
 module.exports = { init, evaluate };

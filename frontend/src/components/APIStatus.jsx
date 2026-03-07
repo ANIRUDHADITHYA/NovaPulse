@@ -139,6 +139,23 @@ export default function APIStatus() {
             label="MongoDB" ok={s.mongodb.ok} error={!s.mongodb.ok ? 'disconnected' : null}
             sub={s.mongodb.ok ? 'connected' : null}
           />
+          {s.ai && (
+            <Tile
+              label={`AI L6 ${s.ai.provider === 'claude' ? '(Claude)' : '(GPT)'}`}
+              ok={s.ai.ok}
+              error={s.ai.error}
+              bar={s.ai.ok ? { used: s.ai.totalTokens, total: 500000 } : null}
+              sub={
+                s.ai.ok
+                  ? [
+                      `${s.ai.callsToday} calls`,
+                      `${s.ai.totalTokens.toLocaleString()} tok`,
+                      `$${s.ai.costUsdToday.toFixed(4)}`,
+                    ].join(' · ')
+                  : null
+              }
+            />
+          )}
         </div>
       )}
     </div>

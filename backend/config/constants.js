@@ -4,8 +4,8 @@
 module.exports.SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
 module.exports.CANDLE_INTERVAL = '15m';
 module.exports.ML_THRESHOLD = 0.72;
-module.exports.TAKE_PROFIT_PCT = 0.01; // 1.0%
-module.exports.STOP_LOSS_PCT = 0.005; // 0.5%
+module.exports.TAKE_PROFIT_PCT = 0.015; // 1.5% — 3:1 R:R vs 0.5% SL
+module.exports.STOP_LOSS_PCT = 0.005;  // 0.5%
 module.exports.OI_DELTA_THRESHOLD = 0.003; // 0.3% — crypto OI typical 15m move is 0.1-0.5%
 module.exports.FUNDING_RATE_THRESHOLD = 0.001; // 0.1%
 module.exports.FEAR_GREED_BUY_MAX = 65; // allow entries up to mild-greed; pure Fear zone was too restrictive

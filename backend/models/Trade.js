@@ -12,8 +12,8 @@ const TradeSchema = new Schema(
     quantity: { type: Number, required: true },
     status: {
       type: String,
-      enum: ['OPEN', 'CLOSED_TP', 'CLOSED_SL', 'CANCELLED'],
-      default: 'OPEN',
+      enum: ['PENDING', 'OPEN', 'CLOSED_TP', 'CLOSED_SL', 'CANCELLED'],
+      default: 'PENDING',
     },
     buyOrderId: String,
     tpOrderId: String,
@@ -22,6 +22,12 @@ const TradeSchema = new Schema(
     mlConfidence: Number,
     pnlPct: Number,
     pnlUsdt: Number,
+    // AI-provided levels (null when AI offline at signal time)
+    aiTp:      Number,
+    aiSl:      Number,
+    aiPattern: String,
+    aiReason:  String,
+    aiRr:      Number,
     openedAt: { type: Date, default: Date.now },
     closedAt: Date,
   },

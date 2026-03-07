@@ -12,11 +12,20 @@ const SignalSchema = new Schema(
     layer3Score: Number,
     layer4Score: Number,
     layer5Score: Number,
+    layer6Score: Number,
     mlConfidence: Number,
     mlOffline: { type: Boolean, default: false },
     finalSignal: { type: String, enum: ['BUY', 'SELL', 'NEUTRAL'], required: true },
     vetoed: { type: Boolean, default: false },
     vetoReason: String,
+    // Layer 6 — AI chart-pattern analysis
+    aiSignal:  { type: String, enum: ['BUY', 'SELL', 'NEUTRAL', null], default: null },
+    aiEntry:   Number,
+    aiSl:      Number,
+    aiTp:      Number,
+    aiRr:      Number,
+    aiPattern: String,
+    aiReason:  String,
   },
   { timestamps: true }
 );

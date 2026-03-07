@@ -21,7 +21,7 @@ router.get('/trades', auth, async (req, res) => {
 
 router.get('/trades/open', auth, async (req, res) => {
   try {
-    const trades = await Trade.find({ status: 'OPEN' }).lean();
+    const trades = await Trade.find({ status: { $in: ['PENDING', 'OPEN'] } }).lean();
     res.json(trades);
   } catch (err) {
     res.status(500).json({ error: err.message });

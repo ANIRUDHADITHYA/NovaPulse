@@ -86,22 +86,11 @@ async function getLatestTaapi(symbol) {
  */
 function scoreTaapi(taapiData, layer1Indicators) {
   if (!taapiData) {
-    // Fallback: re-score using L1 indicators — use IDENTICAL thresholds to scoreLayer1
-    // so L3 never diverges from L1 when taapi is unavailable
-    if (!layer1Indicators) return 0;
-    logger.info('[Taapi] fallback: scoring L3 from L1 indicators (mirrors L1 logic)');
-    const { rsi, macdHistogram, emaCross9_21, bbSqueeze, volumeRatio } = layer1Indicators;
-    let bullish = 0;
-    let bearish = 0;
-    // Mirror scoreLayer1 exactly
-    if (rsi < 40 || (rsi >= 50 && rsi <= 70)) bullish++;
-    else if (rsi > 75) bearish++;
-    if (emaCross9_21 === 'bullish') bullish++;
-    else if (emaCross9_21 === 'bearish') bearish++;
-    if (macdHistogram > 0) bullish++;
-    else if (macdHistogram < 0) bearish++;
-    if (bbSqueeze && volumeRatio > 1.5) bullish++;
-    return bullish > bearish ? 1 : bearish > bullish ? -1 : 0;
+    // Taapi offline — abstain (return 0) rather than mirror L1.
+    // Mirroring produces a correlated vote from the same data, making it easy to
+    // reach the 3-layer consensus threshold with just 2 independent signals.
+    logger.info('[Taapi] offline — Layer 3 abstains (returns 0)');
+    return 0;
   }
 
   const rsi = taapiData.rsi?.value;

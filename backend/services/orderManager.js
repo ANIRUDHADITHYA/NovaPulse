@@ -28,8 +28,11 @@ function init(redis) {
   });
 
   orderQueue.on('failed', (job, err) => {
-    logger.error(`[OrderQueue] Job ${job.id} failed for ${job.data.symbol}: ${err.message}`);
-    telegram.send(`⚠️ TIMEOUT JOB FAILED: ${job.data.symbol} order ${job.data.orderId} — manual check required`);
+    logger.error(`[OrderQueue] Job ${job.id} failed for ${job.data.symbol} (attempt ${job.attemptsMade}/${job.opts.attempts}): ${err.message}`);
+    // Only alert on the final attempt so Telegram doesn't spam once per retry
+    if (job.attemptsMade >= (job.opts.attempts || 1)) {
+      telegram.send(`⚠️ TIMEOUT JOB FAILED: ${job.data.symbol} order ${job.data.orderId} — manual check required`);
+    }
   });
 
   orderQueue.on('stalled', (job) => {
@@ -113,7 +116,7 @@ async function purgeStalePositions() {
             await redisClient.del(REDIS_KEYS.POSITION(symbol));
             if (pos2.tradeId) {
               await Trade.updateOne(
-                { _id: pos2.tradeId, status: 'OPEN' },
+                { _id: pos2.tradeId, status: { $in: ['PENDING', 'OPEN'] } },
                 { status: 'CANCELLED', closedAt: new Date() }
               );
             }
@@ -187,7 +190,7 @@ function startOrderPolling(intervalMs = 30000) {
               await redisClient.del(REDIS_KEYS.POSITION(symbol));
               if (pos.tradeId) {
                 await Trade.updateOne(
-                  { _id: pos.tradeId, status: 'OPEN' },
+                  { _id: pos.tradeId, status: { $in: ['PENDING', 'OPEN'] } },
                   { status: 'CANCELLED', closedAt: new Date() }
                 );
               }
@@ -218,7 +221,7 @@ async function keepAliveUserDataStream(listenKey) {
 // ──────────────────────────────────────────────────────────
 // Signal entry point
 // ──────────────────────────────────────────────────────────
-async function onBuySignal(symbol, currentPrice, mlConfidence) {
+async function onBuySignal(symbol, currentPrice, mlConfidence, aiResult) {
   const allowed = await riskManager.canTrade(symbol);
   if (!allowed) return;
 
@@ -230,10 +233,16 @@ async function onBuySignal(symbol, currentPrice, mlConfidence) {
       return;
     }
     const { tickSize, stepSize, minNotional } = JSON.parse(infoRaw);
+
+    // Use AI entry price when available; otherwise use the current market price
+    const rawEntryPrice = (aiResult?.signal === 'BUY' && aiResult?.entry)
+      ? aiResult.entry
+      : currentPrice;
+
     const capitalUsdt = await riskManager.getPositionSize();
-    const rawQty = capitalUsdt / currentPrice;
+    const rawQty = capitalUsdt / rawEntryPrice;
     const quantity = binance.roundToStepSize(rawQty, stepSize);
-    const price = binance.roundToTickSize(currentPrice, tickSize);
+    const price = binance.roundToTickSize(rawEntryPrice, tickSize);
 
     if (quantity * price < minNotional) {
       logger.warn(`[OrderManager] SKIPPED: below minNotional for ${symbol}`);
@@ -241,7 +250,7 @@ async function onBuySignal(symbol, currentPrice, mlConfidence) {
       return;
     }
 
-    await placeLimitBuyOrder(symbol, quantity, price, mlConfidence);
+    await placeLimitBuyOrder(symbol, quantity, price, mlConfidence, aiResult, tickSize);
   } catch (err) {
     logger.error(`[OrderManager] onBuySignal error: ${err.message}`);
   } finally {
@@ -249,7 +258,7 @@ async function onBuySignal(symbol, currentPrice, mlConfidence) {
   }
 }
 
-async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence) {
+async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence, aiResult, tickSize) {
   const order = await binance.restPost('/api/v3/order', {
     symbol,
     side: 'BUY',
@@ -261,6 +270,15 @@ async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence) {
 
   logger.info(`[OrderManager] BUY order placed: ${symbol} qty=${quantity} price=${price} orderId=${order.orderId}`);
 
+  // Pre-compute AI-derived TP/SL prices so they are stored with the trade record.
+  // onBuyFilled will read them back from the position key instead of re-calculating.
+  let aiTpPrice = null;
+  let aiSlPrice = null;
+  if (aiResult?.signal === 'BUY' && aiResult?.tp && aiResult?.sl && tickSize) {
+    aiTpPrice = binance.roundToTickSize(aiResult.tp, tickSize);
+    aiSlPrice = binance.roundToTickSize(aiResult.sl, tickSize);
+  }
+
   // Queue timeout job
   const job = await orderQueue.add({ symbol, orderId: order.orderId }, { delay: ORDER_TIMEOUT_MS });
 
@@ -270,20 +288,27 @@ async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence) {
     side: 'BUY',
     entryPrice: price,
     quantity,
-    status: 'OPEN',
+    status: 'PENDING',
     buyOrderId: String(order.orderId),
     bullJobId: String(job.id),
     mlConfidence,
+    aiTp:      aiTpPrice,
+    aiSl:      aiSlPrice,
+    aiPattern: aiResult?.pattern ?? null,
+    aiReason:  aiResult?.reason  ?? null,
+    aiRr:      aiResult?.rr      ?? null,
     openedAt: new Date(),
   });
 
-  // Store position in Redis
+  // Store position in Redis — include AI levels so onBuyFilled can use them
   await redisClient.set(REDIS_KEYS.POSITION(symbol), JSON.stringify({
     tradeId: trade._id.toString(),
     buyOrderId: String(order.orderId),
     entryPrice: price,
     quantity,
     bullJobId: String(job.id),
+    aiTp: aiTpPrice,
+    aiSl: aiSlPrice,
   }));
 
   emitter.emit('order:opened', {
@@ -296,7 +321,10 @@ async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence) {
     timestamp: new Date().toISOString(),
   });
 
-  telegram.send(`🟢 BUY ${symbol} | Entry: $${price} | Qty: ${quantity} | Score: ${mlConfidence?.toFixed(2) ?? 'N/A'}`);
+  const aiInfo = aiTpPrice
+    ? ` | AI TP:$${aiTpPrice} SL:$${aiSlPrice} R:R=${aiResult?.rr?.toFixed(2)} [${aiResult?.pattern ?? 'N/A'}]`
+    : ' | AI: offline';
+  telegram.send(`🟢 BUY ${symbol} | Entry: $${price} | Qty: ${quantity} | Score: ${mlConfidence?.toFixed(2) ?? 'N/A'}${aiInfo}`);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -353,8 +381,16 @@ async function onBuyFilled(symbol, pos, filledPrice, filledQty) {
     return;
   }
 
-  const tpPrice = binance.roundToTickSize(filledPrice * (1 + TAKE_PROFIT_PCT), tickSize);
-  const slPrice = binance.roundToTickSize(filledPrice * (1 - STOP_LOSS_PCT), tickSize);
+  const tpPrice = (pos.aiTp && pos.aiTp > filledPrice)
+    ? binance.roundToTickSize(pos.aiTp, tickSize)   // AI-derived level from chart structure
+    : binance.roundToTickSize(filledPrice * (1 + TAKE_PROFIT_PCT), tickSize); // fallback %
+
+  const slPrice = (pos.aiSl && pos.aiSl < filledPrice)
+    ? binance.roundToTickSize(pos.aiSl, tickSize)   // AI-derived level from chart structure
+    : binance.roundToTickSize(filledPrice * (1 - STOP_LOSS_PCT), tickSize);  // fallback %
+
+  const levelsSource = pos.aiTp ? 'AI-chart' : 'pct-fallback';
+  logger.info(`[OrderManager] ${symbol} TP/SL source: ${levelsSource}`);
 
   const [tpOrder, slOrder] = await Promise.all([
     binance.restPost('/api/v3/order', {
@@ -374,7 +410,8 @@ async function onBuyFilled(symbol, pos, filledPrice, filledQty) {
     slOrderId: String(slOrder.orderId),
   };
   await redisClient.set(REDIS_KEYS.POSITION(symbol), JSON.stringify(updatedPos));
-  await Trade.updateOne({ _id: pos.tradeId }, { entryPrice: filledPrice, tpOrderId: String(tpOrder.orderId), slOrderId: String(slOrder.orderId) });
+  // Transition PENDING → OPEN now that the buy is filled and TP/SL are live
+  await Trade.updateOne({ _id: pos.tradeId }, { status: 'OPEN', entryPrice: filledPrice, tpOrderId: String(tpOrder.orderId), slOrderId: String(slOrder.orderId) });
 
   emitter.emit('order:filled', {
     symbol,
@@ -385,7 +422,7 @@ async function onBuyFilled(symbol, pos, filledPrice, filledQty) {
     slOrderId: slOrder.orderId,
   });
 
-  logger.info(`[OrderManager] BUY filled ${symbol} @ ${filledPrice} | TP: ${tpPrice} | SL: ${slPrice}`);
+  logger.info(`[OrderManager] BUY filled ${symbol} @ ${filledPrice} | TP: ${tpPrice} | SL: ${slPrice} | source: ${levelsSource}`);
 }
 
 async function onTpFilled(symbol, pos, exitPrice, qty) {
@@ -469,7 +506,7 @@ async function handleOrderTimeout(symbol, orderId) {
     // Treat as external cancellation — clean up without retrying so the job doesn't keep failing.
     if (httpStatus === 400) {
       await redisClient.del(REDIS_KEYS.POSITION(symbol));
-      await Trade.updateOne({ buyOrderId: String(orderId), status: 'OPEN' }, { status: 'CANCELLED', closedAt: new Date() });
+      await Trade.updateOne({ buyOrderId: String(orderId), status: { $in: ['PENDING', 'OPEN'] } }, { status: 'CANCELLED', closedAt: new Date() });
       emitter.emit('order:cancelled', { symbol, orderId, reason: 'not_found_on_exchange' });
       logger.warn(`[OrderManager] Timeout: order ${orderId} for ${symbol} not found on Binance (code ${binanceCode}) — purged as CANCELLED`);
       return; // don't throw — job completes cleanly, no Bull retry

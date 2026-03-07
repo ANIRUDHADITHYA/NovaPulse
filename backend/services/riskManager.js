@@ -18,13 +18,18 @@ function init(redis) {
  * Uses Redis SET NX for atomic lock to prevent race conditions.
  */
 async function canTrade(symbol) {
-  // Check halted flag
-  const halted = await redisClient.get(REDIS_KEYS.TRADING_HALTED);
-  if (halted) {
-    const msg = `⛔ BUY BLOCKED [${symbol}] — trading is halted. Use /api/trading/resume to re-enable.`;
-    logger.warn(`[RiskManager] ${msg}`);
-    telegram.send(msg);
-    return false;
+  // Check halted flag (skipped in test mode — DISABLE_DAILY_LIMITS=true)
+  const limitsDisabled = process.env.DISABLE_DAILY_LIMITS === 'true';
+  if (!limitsDisabled) {
+    const halted = await redisClient.get(REDIS_KEYS.TRADING_HALTED);
+    if (halted) {
+      const msg = `⛔ BUY BLOCKED [${symbol}] — trading is halted. Use /api/trading/resume to re-enable.`;
+      logger.warn(`[RiskManager] ${msg}`);
+      telegram.send(msg);
+      return false;
+    }
+  } else {
+    logger.info(`[RiskManager] Daily limits disabled (test mode) — halted-flag check skipped for ${symbol}`);
   }
 
   // Atomic concurrency lock (15s TTL).
@@ -44,7 +49,7 @@ async function canTrade(symbol) {
   }
 
   // Position count
-  const openTrades = await Trade.countDocuments({ status: 'OPEN' });
+  const openTrades = await Trade.countDocuments({ status: { $in: ['PENDING', 'OPEN'] } });
   if (openTrades >= MAX_OPEN_POSITIONS) {
     await releaseLock();
     logger.info(`[RiskManager] Max open positions (${MAX_OPEN_POSITIONS}) reached`);
@@ -95,8 +100,9 @@ async function recordTradePnL(pnlPct, pnlUsdt) {
   await redisClient.set(REDIS_KEYS.WEEKLY_PNL, newWeeklyPnl.toFixed(4));
 
   const maxDrawdown = -Math.abs(parseFloat(process.env.MAX_DAILY_DRAWDOWN || '2'));
+  const limitsDisabled = process.env.DISABLE_DAILY_LIMITS === 'true';
 
-  if (newDailyPnl <= maxDrawdown) {
+  if (!limitsDisabled && newDailyPnl <= maxDrawdown) {
     // Expire the halt at UTC midnight so the bot auto-resets each day.
     // Math.max(1, ...) guards against the EX=0 edge case at exactly 00:00:00 UTC,
     // which Redis rejects as an invalid TTL.
@@ -111,9 +117,11 @@ async function recordTradePnL(pnlPct, pnlUsdt) {
       dailyPnlPct: newDailyPnl,
       timestamp: new Date().toISOString(),
     });
+  } else if (limitsDisabled && newDailyPnl <= maxDrawdown) {
+    logger.info(`[RiskManager] Daily drawdown ${newDailyPnl.toFixed(2)}% exceeded but limits are disabled (test mode) — continuing`);
   }
 
-  if (newWeeklyPnl <= -5) {
+  if (!limitsDisabled && newWeeklyPnl <= -5) {
     await redisClient.set(REDIS_KEYS.WEEKLY_REVIEW_FLAG, '1');
     telegram.send(`⚠️ WEEKLY DRAWDOWN -5% — Manual review required`);
   }
@@ -122,7 +130,7 @@ async function recordTradePnL(pnlPct, pnlUsdt) {
     dailyPnlPct: newDailyPnl,
     dailyPnlUsdt: newDailyPnlUsdt,
     weeklyPnlPct: newWeeklyPnl,
-    openPositions: await Trade.countDocuments({ status: 'OPEN' }),
+    openPositions: await Trade.countDocuments({ status: { $in: ['PENDING', 'OPEN'] } }),
     tradingHalted: !!(await redisClient.get(REDIS_KEYS.TRADING_HALTED)),
   });
 }

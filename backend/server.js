@@ -26,6 +26,7 @@ const orderManager = require('./services/orderManager');
 const riskManager = require('./services/riskManager');
 const retrainJob = require('./jobs/retrainJob');
 const newsService = require('./services/news');
+const aiSignal = require('./services/aiSignal');
 
 const authRoutes = require('./routes/auth');
 const tradesRoutes = require('./routes/trades');
@@ -137,6 +138,7 @@ async function bootstrap() {
   signalService.init(redis);
   orderManager.init(redis);
   riskManager.init(redis);
+  aiSignal.init(redis);
   controlRoute.init(redis);
   statusRoute.init(redis);
   oiRoute.init(redis);
