@@ -77,6 +77,7 @@ export default function SignalPanel({ symbol, lastSignal }) {
               <LayerRow label="L3 Taapi"      score={s.layer3Score} />
               <LayerRow label="L4 Sentiment"  score={s.layer4Score} />
               <LayerRow label="L5 ML"         score={s.layer5Score} />
+              <LayerRow label="L6 AI Pattern" score={s.layer6Score ?? 0} />
             </tbody>
           </table>
           <div style={{ marginTop: 8 }}>
