@@ -41,7 +41,7 @@ function StatCard({ label, value, color, sub }) {
 }
 
 const PAGE_SIZE = 25;
-const SYMBOLS = ['ALL', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'HYPEUSDT'];
+const SYMBOLS = ['ALL', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOTUSDT'];
 
 export default function Portfolio() {
   const navigate = useNavigate();

@@ -1,7 +1,7 @@
 import { logout } from '../services/api';
 import { useNavigate } from 'react-router-dom';
 
-const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'HYPEUSDT'];
+const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOTUSDT'];
 
 export default function Navbar({ symbol, setSymbol, connected, pnlState }) {
   const navigate = useNavigate();

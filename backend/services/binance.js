@@ -61,6 +61,17 @@ async function handleHttpError(err) {
 // ──────────────────────────────────────────────────────────
 // REST client
 // ──────────────────────────────────────────────────────────
+
+/**
+ * Public market-data GET — always targets production api.binance.com.
+ * Testnet only carries BTC/ETH/BNB klines; all other symbols (e.g. DOTUSDT)
+ * simply return no data there. No API key or signature required.
+ */
+async function marketGet(path, params = {}) {
+  const res = await axios.get(`https://api.binance.com${path}`, { params });
+  return res.data;
+}
+
 async function restGet(path, params = {}, weight = 1, signed = false) {
   const ipBanned = await redisClient.get(REDIS_KEYS.IP_BANNED);
   if (ipBanned) {
@@ -226,7 +237,8 @@ async function fetchHistoricalCandles(symbol, interval, limit = 200, endTime = n
   const params = { symbol, interval, limit };
   if (endTime) params.endTime = endTime;
   if (startTime) params.startTime = startTime;
-  return restGet('/api/v3/klines', params, 2);
+  // Always use production market data — testnet only has BTC/ETH/BNB klines
+  return marketGet('/api/v3/klines', params);
 }
 
 /**
@@ -418,7 +430,9 @@ async function seedCandleBuffer(symbol) {
 // ──────────────────────────────────────────────────────────
 function openCandleStream(symbol) {
   const stream = symbol.toLowerCase() + `@kline_${CANDLE_INTERVAL}`;
-  const url = `${process.env.BINANCE_WS_BASE}/${stream}`;
+  // Market data streams always use production — testnet WS only carries BTC/ETH/BNB
+  const wsMarketBase = process.env.BINANCE_MARKET_WS_BASE || 'wss://stream.binance.com:9443/ws';
+  const url = `${wsMarketBase}/${stream}`;
   let isReconnect = false; // tracks whether this is the initial connect or a subsequent reconnect
 
   function connect() {

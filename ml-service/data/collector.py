@@ -10,7 +10,7 @@ from pathlib import Path
 
 BASE_URL = "https://api.binance.com"
 FUTURES_URL = "https://fapi.binance.com"
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOTUSDT"]
 INTERVAL = "15m"
 LOOKBACK_DAYS = 180  # 6 months
 
