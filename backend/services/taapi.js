@@ -23,18 +23,10 @@ async function _incTaapiCounter() {
   }
 }
 
-async function fetchBulkIndicators() {
-  const secret = process.env.TAAPI_SECRET;
-  if (!secret) {
-    logger.warn('[Taapi] No TAAPI_SECRET — skipping');
-    return null;
-  }
+async function fetchSymbolIndicators(secret, symbol) {
   await _incTaapiCounter();
-
-  // Taapi "Multiple Constructs" format: one construct per symbol,
-  // with all indicators nested inside an `indicators` array.
-  // Flat per-indicator objects (old format) return 400.
-  const constructs = SYMBOLS.map((symbol) => ({
+  // Free plan allows only 1 construct per bulk call — query each symbol individually.
+  const construct = [{
     exchange: 'binance',
     symbol: symbol.replace('USDT', '/USDT'),
     interval: CANDLE_INTERVAL,
@@ -43,37 +35,48 @@ async function fetchBulkIndicators() {
       { indicator: 'macd' },
       { indicator: 'ema' },
     ],
-  }));
+  }];
 
-  try {
-    const res = await axios.post(`${TAAPI_BASE}/bulk`, { secret, construct: constructs });
-    const data = res.data.data;
+  const res = await axios.post(`${TAAPI_BASE}/bulk`, { secret, construct });
+  const data = res.data.data;
 
-    // Auto-generated ID format: "binance_BTC/USDT_15m_rsi_14_0"
-    // Split on '_': [exchange, "BTC/USDT", interval, indicator, ...]
-    const results = {};
-    for (const item of data) {
-      const parts = item.id.split('_');
-      // parts[1] is "BTC/USDT" — strip slash to get our internal key
-      const symbol = parts[1]?.replace('/', '');
-      const indicator = parts[3];
-      if (!symbol || !indicator) continue;
-      if (!results[symbol]) results[symbol] = {};
-      results[symbol][indicator] = item.result;
-    }
+  // Auto-generated ID format: "binance_BTC/USDT_15m_rsi_14_0"
+  const result = {};
+  for (const item of data) {
+    const parts = item.id.split('_');
+    const indicator = parts[3];
+    if (indicator) result[indicator] = item.result;
+  }
+  return result;
+}
 
-    for (const symbol of SYMBOLS) {
-      if (results[symbol]) {
-        await redisClient.set(REDIS_KEYS.TAAPI(symbol), JSON.stringify(results[symbol]), 'EX', 960);
-      }
-    }
-    logger.info('[Taapi] Bulk indicators fetched successfully');
-    return results;
-  } catch (err) {
-    const detail = err.response?.data ? ` | ${JSON.stringify(err.response.data)}` : '';
-    logger.warn(`[Taapi] Fetch failed — using fallback: ${err.message}${detail}`);
+async function fetchBulkIndicators() {
+  const secret = process.env.TAAPI_SECRET;
+  if (!secret) {
+    logger.warn('[Taapi] No TAAPI_SECRET — skipping');
     return null;
   }
+
+  // Query each symbol one at a time (free plan: 1 construct per request).
+  // Stagger calls by 1s to avoid hitting the per-minute rate limit.
+  const results = {};
+  for (const symbol of SYMBOLS) {
+    try {
+      results[symbol] = await fetchSymbolIndicators(secret, symbol);
+      await redisClient.set(REDIS_KEYS.TAAPI(symbol), JSON.stringify(results[symbol]), 'EX', 960);
+      logger.info(`[Taapi] Fetched indicators for ${symbol}`);
+    } catch (err) {
+      const detail = err.response?.data ? ` | ${JSON.stringify(err.response.data)}` : '';
+      logger.warn(`[Taapi] Failed for ${symbol}: ${err.message}${detail}`);
+    }
+    // Small pause between symbols to stay within rate limit
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+
+  const fetched = Object.keys(results).length;
+  if (fetched === 0) return null;
+  logger.info(`[Taapi] Indicators fetched for ${fetched}/${SYMBOLS.length} symbols`);
+  return results;
 }
 
 async function getLatestTaapi(symbol) {
