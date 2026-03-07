@@ -25,7 +25,7 @@ router.post('/auth/login', loginLimiter, async (req, res) => {
   const token = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '24h' });
   res.cookie('token', token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: process.env.NODE_ENV === 'production' && process.env.COOKIE_SECURE !== 'false',
     sameSite: 'strict',
     maxAge: 86400000,
   });
