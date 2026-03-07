@@ -26,7 +26,7 @@ router.post('/auth/login', loginLimiter, async (req, res) => {
   res.cookie('token', token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production' && process.env.COOKIE_SECURE !== 'false',
-    sameSite: 'strict',
+    sameSite: 'lax',
     maxAge: 86400000,
   });
   res.json({ success: true });
