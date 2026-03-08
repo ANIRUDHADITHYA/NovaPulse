@@ -234,23 +234,18 @@ async function onBuySignal(symbol, currentPrice, mlConfidence, aiResult) {
     }
     const { tickSize, stepSize, minNotional } = JSON.parse(infoRaw);
 
-    // Use AI entry price when available; otherwise use the current market price
-    const rawEntryPrice = (aiResult?.signal === 'BUY' && aiResult?.entry)
-      ? aiResult.entry
-      : currentPrice;
-
+    // Use current market price for quantity sizing (MARKET order — no limit price needed)
     const capitalUsdt = await riskManager.getPositionSize();
-    const rawQty = capitalUsdt / rawEntryPrice;
+    const rawQty = capitalUsdt / currentPrice;
     const quantity = binance.roundToStepSize(rawQty, stepSize);
-    const price = binance.roundToTickSize(rawEntryPrice, tickSize);
 
-    if (quantity * price < minNotional) {
+    if (quantity * currentPrice < minNotional) {
       logger.warn(`[OrderManager] SKIPPED: below minNotional for ${symbol}`);
       await riskManager.releaseLock();
       return;
     }
 
-    await placeLimitBuyOrder(symbol, quantity, price, mlConfidence, aiResult, tickSize);
+    await placeMarketBuyOrder(symbol, quantity, mlConfidence, aiResult, tickSize);
   } catch (err) {
     logger.error(`[OrderManager] onBuySignal error: ${err.message}`);
   } finally {
@@ -258,17 +253,19 @@ async function onBuySignal(symbol, currentPrice, mlConfidence, aiResult) {
   }
 }
 
-async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence, aiResult, tickSize) {
+async function placeMarketBuyOrder(symbol, quantity, mlConfidence, aiResult, tickSize) {
   const order = await binance.restPost('/api/v3/order', {
     symbol,
     side: 'BUY',
-    type: 'LIMIT',
-    timeInForce: 'GTC',
+    type: 'MARKET',
     quantity,
-    price,
   }, 1);
 
-  logger.info(`[OrderManager] BUY order placed: ${symbol} qty=${quantity} price=${price} orderId=${order.orderId}`);
+  // MARKET orders fill immediately — extract actual fill price from the response
+  const filledPrice = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
+  const filledQty = parseFloat(order.executedQty);
+
+  logger.info(`[OrderManager] MARKET BUY filled: ${symbol} qty=${filledQty} @ ${filledPrice.toFixed(2)} orderId=${order.orderId}`);
 
   // Pre-compute AI-derived TP/SL prices so they are stored with the trade record.
   // onBuyFilled will read them back from the position key instead of re-calculating.
@@ -279,18 +276,14 @@ async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence, aiResul
     aiSlPrice = binance.roundToTickSize(aiResult.sl, tickSize);
   }
 
-  // Queue timeout job
-  const job = await orderQueue.add({ symbol, orderId: order.orderId }, { delay: ORDER_TIMEOUT_MS });
-
-  // Save trade to MongoDB
+  // Save trade to MongoDB (PENDING → onBuyFilled will update to OPEN)
   const trade = await Trade.create({
     symbol,
     side: 'BUY',
-    entryPrice: price,
-    quantity,
+    entryPrice: filledPrice,
+    quantity: filledQty,
     status: 'PENDING',
     buyOrderId: String(order.orderId),
-    bullJobId: String(job.id),
     mlConfidence,
     aiTp:      aiTpPrice,
     aiSl:      aiSlPrice,
@@ -300,31 +293,35 @@ async function placeLimitBuyOrder(symbol, quantity, price, mlConfidence, aiResul
     openedAt: new Date(),
   });
 
-  // Store position in Redis — include AI levels so onBuyFilled can use them
-  await redisClient.set(REDIS_KEYS.POSITION(symbol), JSON.stringify({
+  const pos = {
     tradeId: trade._id.toString(),
     buyOrderId: String(order.orderId),
-    entryPrice: price,
-    quantity,
-    bullJobId: String(job.id),
+    entryPrice: filledPrice,
+    quantity: filledQty,
     aiTp: aiTpPrice,
     aiSl: aiSlPrice,
-  }));
+  };
+
+  // Store position in Redis — include AI levels so onBuyFilled can use them
+  await redisClient.set(REDIS_KEYS.POSITION(symbol), JSON.stringify(pos));
 
   emitter.emit('order:opened', {
     symbol,
     orderId: order.orderId,
     side: 'BUY',
-    price,
-    quantity,
-    status: 'PENDING',
+    price: filledPrice,
+    quantity: filledQty,
+    status: 'FILLED',
     timestamp: new Date().toISOString(),
   });
 
   const aiInfo = aiTpPrice
     ? ` | AI TP:$${aiTpPrice} SL:$${aiSlPrice} R:R=${aiResult?.rr?.toFixed(2)} [${aiResult?.pattern ?? 'N/A'}]`
     : ' | AI: offline';
-  telegram.send(`🟢 BUY ${symbol} | Entry: $${price} | Qty: ${quantity} | Score: ${mlConfidence?.toFixed(2) ?? 'N/A'}${aiInfo}`);
+  telegram.send(`🟢 BUY ${symbol} | Entry: $${filledPrice.toFixed(2)} | Qty: ${filledQty} | Score: ${mlConfidence?.toFixed(2) ?? 'N/A'}${aiInfo}`);
+
+  // Market order fills instantly — set up TP/SL immediately without waiting for UDS/poll
+  await onBuyFilled(symbol, pos, filledPrice, filledQty);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -341,7 +338,8 @@ async function handleOrderUpdate(msg) {
     if (status === 'FILLED') {
       const qty = parseFloat(filledQty);
       const entry = parseFloat(filledPrice);
-      if (qty > 0) await onBuyFilled(symbol, pos, entry, qty);
+      // Guard: market orders already call onBuyFilled synchronously (pos.tpOrderId is set by then)
+      if (qty > 0 && !pos.tpOrderId) await onBuyFilled(symbol, pos, entry, qty);
     } else if (status === 'PARTIALLY_FILLED') {
       const qty = parseFloat(filledQty);
       const entry = parseFloat(filledPrice);

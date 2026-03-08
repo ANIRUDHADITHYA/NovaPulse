@@ -219,13 +219,20 @@ function validateResponse(result, currentPrice) {
   const { entry, sl, tp } = result;
   if ([entry, sl, tp].some((v) => typeof v !== 'number' || isNaN(v) || v <= 0)) return false;
 
-  // All three levels must be within 5% of current price (catches hallucinated values)
-  const within5 = (v) => Math.abs(v - currentPrice) / currentPrice < 0.05;
-  if (!within5(entry) || !within5(sl) || !within5(tp)) return false;
+  // All three levels must be within 8% of current price (catches hallucinated values;
+  // wider than 5% to allow structural swing SL/TP placed at real support/resistance levels)
+  const within8 = (v) => Math.abs(v - currentPrice) / currentPrice < 0.08;
+  if (!within8(entry) || !within8(sl) || !within8(tp)) {
+    logger.warn(
+      `[AISignal] Rejected: price levels outside 8% band — ` +
+      `entry:${entry} sl:${sl} tp:${tp} current:${currentPrice}`
+    );
+    return false;
+  }
 
   // Structural checks
-  if (result.signal === 'BUY'  && !(sl < entry && entry <= tp)) return false;
-  if (result.signal === 'SELL' && !(tp <= entry && entry < sl)) return false;
+  if (result.signal === 'BUY'  && !(sl < entry && entry < tp)) return false;
+  if (result.signal === 'SELL' && !(tp < entry && entry < sl)) return false;
 
   // Enforce minimum 1.5 R:R (AI should target 2.0 but we floor at 1.5)
   const risk   = Math.abs(entry - sl);

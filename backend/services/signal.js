@@ -139,52 +139,93 @@ async function evaluate(symbol) {
     mlOffline = true;
   }
 
-  // All layers must agree (no veto, and sum > 0 for BUY)
+  // Compute internal-engine net score across active (non-zero) layers
   const numericScores = [layer1, layer2, layer3, layer4, layer5].filter((s) => s !== 0);
+  const netScore = numericScores.reduce((a, b) => a + b, 0);
   const allBullish = numericScores.length >= 3 && numericScores.every((s) => s === 1);
   const allBearish = numericScores.length >= 3 && numericScores.every((s) => s === -1);
 
-  let finalSignal = 'NEUTRAL';
-  if (allBullish) finalSignal = 'BUY';
-  else if (allBearish) finalSignal = 'SELL';
+  let engineSignal = 'NEUTRAL';
+  if (allBullish) engineSignal = 'BUY';
+  else if (allBearish) engineSignal = 'SELL';
 
-  // ── Layer 6: AI chart-pattern confirmation ──────────────────────────────────
-  // Only invoked when layers 1-5 agree on a directional trade (saves API calls).
-  // If the AI disagrees or is offline, we treat it as VETO or abstain respectively.
+  // ── Layer 6: AI chart-pattern analysis ──────────────────────────────────────
+  // AI is called on EVERY candle (not just when layers 1-5 reach full consensus).
+  // This ensures OpenAI is utilised even when auxiliary data feeds (OI, TAAPI, ML)
+  // are offline and cannot contribute non-zero scores.
+  //
+  // Decision rules:
+  //  • AI BUY/SELL accepted  → internal net score does not strongly oppose it
+  //  • AI BUY/SELL vetoed    → 2+ internal layers ALL point the other way
+  //  • AI NEUTRAL            → vetoes any directional engine signal; keeps NEUTRAL
+  //  • AI offline            → fall back to internal engine result
   let layer6 = 0;
-  let aiResult = null; // { signal, entry, sl, tp, rr, pattern, reason }
+  let aiResult = null;
+  let finalSignal = engineSignal;
 
-  if (finalSignal === 'BUY' || finalSignal === 'SELL') {
-    // Read raw candles from Redis for AI pattern analysis
-    const raw = await redisClient.lrange(REDIS_KEYS.CANDLE_BUFFER(symbol), 0, -1);
-    const candles = raw.map((s) => JSON.parse(s));
+  // Read raw candles for AI prompt (needed regardless of engine signal)
+  const raw = await redisClient.lrange(REDIS_KEYS.CANDLE_BUFFER(symbol), 0, -1);
+  const candles = raw.map((s) => JSON.parse(s));
+  const layerSummary =
+    `L1:${layer1} L2:${layer2} L3:${layer3} L4:${layer4} L5:${layer5} ` +
+    `ML:${mlConfidence ?? 'N/A'} engine:${engineSignal}`;
 
-    const layerSummary =
-      `L1:${layer1} L2:${layer2} L3:${layer3} L4:${layer4} L5:${layer5} ML:${mlConfidence ?? 'N/A'}`;
+  aiResult = await aiSignal.analyze(symbol, candles, ind, oiData, sentimentData, layerSummary);
 
-    aiResult = await aiSignal.analyze(symbol, candles, ind, oiData, sentimentData, layerSummary);
+  if (aiResult === null) {
+    // AI offline — use internal engine result unchanged
+    layer6 = 0;
+    logger.info(`[Signal] ${symbol} — Layer 6 offline, using internal engine: ${engineSignal}`);
+  } else if (aiResult.signal === 'NEUTRAL') {
+    // AI sees no setup — veto any directional engine signal
+    if (engineSignal !== 'NEUTRAL') {
+      layer6 = -1;
+      logger.warn(`[Signal] ${symbol} — Layer 6 AI VETO: engine=${engineSignal} AI=NEUTRAL (${aiResult.reason})`);
+      await saveAndEmit(symbol, layer1, layer2, layer3, layer4, layer5,
+        mlConfidence, mlOffline, 'NEUTRAL', true, 'AI_VETO', layer6, aiResult);
+      return;
+    }
+    layer6 = 0; // both neutral — abstain
+  } else {
+    // AI has a directional opinion (BUY or SELL)
+    // Veto the AI only when internal layers *unanimously* oppose it (2+ layers all disagreeing)
+    const strongOpposition =
+      (aiResult.signal === 'BUY'  && numericScores.length >= 2 && numericScores.every((s) => s === -1)) ||
+      (aiResult.signal === 'SELL' && numericScores.length >= 2 && numericScores.every((s) => s === 1));
 
-    if (aiResult !== null) {
-      // AI responded — honour its verdict
-      if (aiResult.signal === finalSignal) {
-        layer6 = 1;  // confirms direction
-      } else {
-        layer6 = -1; // AI disagrees → veto
-        logger.warn(
-          `[Signal] ${symbol} — Layer 6 AI VETO: engine=${finalSignal} AI=${aiResult.signal} ` +
-          `(${aiResult.reason})`
-        );
-        await saveAndEmit(
-          symbol, layer1, layer2, layer3, layer4, layer5,
-          mlConfidence, mlOffline, 'NEUTRAL', true, 'AI_VETO',
-          layer6, aiResult
-        );
-        return;
-      }
+    if (strongOpposition) {
+      layer6 = -1;
+      logger.warn(
+        `[Signal] ${symbol} — Layer 6 AI rejected (internal opposition): ` +
+        `AI=${aiResult.signal} netScore=${netScore} (${aiResult.reason})`
+      );
+      finalSignal = 'NEUTRAL';
+      await saveAndEmit(symbol, layer1, layer2, layer3, layer4, layer5,
+        mlConfidence, mlOffline, 'NEUTRAL', true, 'AI_VETO', layer6, aiResult);
+      return;
+    }
+
+    // Internal layers not strongly opposing — check net score aligns with AI direction
+    const netAligns =
+      (aiResult.signal === 'BUY'  && netScore >= 0) ||
+      (aiResult.signal === 'SELL' && netScore <= 0);
+
+    if (netAligns) {
+      layer6 = 1;
+      finalSignal = aiResult.signal;
+      logger.info(
+        `[Signal] ${symbol} — Layer 6 AI ${engineSignal === aiResult.signal ? 'CONFIRMED' : 'OVERRIDE'}: ` +
+        `engine=${engineSignal} → AI=${aiResult.signal} netScore=${netScore} R:R=${aiResult.rr?.toFixed(2)} ` +
+        `[${aiResult.pattern}] ${aiResult.reason}`
+      );
     } else {
-      // AI offline — abstain; don't block trade
-      layer6 = 0;
-      logger.info(`[Signal] ${symbol} — Layer 6 offline, proceeding without AI levels`);
+      // AI direction conflicts with internal net — reject AI suggestion, keep engine result
+      layer6 = -1;
+      logger.warn(
+        `[Signal] ${symbol} — Layer 6 AI rejected (net score conflict): ` +
+        `AI=${aiResult.signal} netScore=${netScore}`
+      );
+      finalSignal = engineSignal;
     }
   }
 
