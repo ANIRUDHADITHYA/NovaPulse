@@ -245,8 +245,10 @@ async function evaluate(symbol) {
 function buildMLFeatures(ind, oiData, sentimentData, taapiData) {
   const now = new Date();
   return {
-    ema_cross_9_21: ind.emaCross9_21 === 'bullish' ? 1 : ind.emaCross9_21 === 'bearish' ? -1 : 0,
-    ema_cross_21_50: ind.emaCross21_50 === 'bullish' ? 1 : ind.emaCross21_50 === 'bearish' ? -1 : 0,
+    // Match features.py: np.where(ema9 > ema21, 1, -1) — continuous stack comparison,
+    // NOT the crossover event (which is 'none' 99% of candles and was never seen in training)
+    ema_cross_9_21:  ind.ema9  > ind.ema21 ? 1 : -1,
+    ema_cross_21_50: ind.ema21 > ind.ema50 ? 1 : -1,
     rsi_14: ind.rsi,
     macd_histogram: ind.macdHistogram,
     bb_squeeze: ind.bbSqueeze ? 1 : 0,
@@ -254,8 +256,10 @@ function buildMLFeatures(ind, oiData, sentimentData, taapiData) {
     oi_change_pct_15m: oiData?.oiDeltaPct ?? 0,
     oi_change_pct_1h: oiData?.oiDelta1hPct ?? 0,
     funding_rate: oiData?.fundingRate ?? 0,
-    long_short_ratio: oiData?.longShortRatio ?? 0.5,
-    fear_greed_value: sentimentData?.value ?? 50,
+    // Training data used placeholder constants for these two features.
+    // Lock to the same constants until we retrain with real historical data.
+    long_short_ratio: 0.5,
+    fear_greed_value: 50,
     taapi_rsi: taapiData?.rsi?.value ?? ind.rsi,
     taapi_macd_signal: taapiData?.macd?.valueMACDSignal ?? ind.macdSignal,
     hour_of_day: now.getUTCHours(),
