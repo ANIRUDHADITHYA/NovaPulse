@@ -30,6 +30,10 @@ const optional = [
   'MAX_DAILY_DRAWDOWN',       // default: 2 (%) — max daily loss before halt
   'ML_CONFIDENCE_THRESHOLD',  // default: 0.72 — minimum ML score for BUY
   'ML_PORT',                  // default: 5001 — Flask ML service port
+  'AI_PROVIDER',              // 'openai' | 'claude' — Layer 6 AI analysis
+  'OPENAI_API_KEY',           // required when AI_PROVIDER=openai
+  'ANTHROPIC_API_KEY',        // required when AI_PROVIDER=claude
+  'AI_MODEL',                 // optional model override
 ];
 for (const key of optional) {
   if (!process.env[key]) {

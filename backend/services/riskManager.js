@@ -18,9 +18,11 @@ function init(redis) {
  * Uses Redis SET NX for atomic lock to prevent race conditions.
  */
 async function canTrade(symbol) {
-  // Check halted flag (skipped in test mode — DISABLE_DAILY_LIMITS=true)
-  const limitsDisabled = process.env.DISABLE_DAILY_LIMITS === 'true';
-  if (!limitsDisabled) {
+  // On testnet every BUY signal should fire freely — no daily/position limits.
+  // Only the per-symbol duplicate guard is kept to avoid doubling into the same coin.
+  const isTestnet = process.env.BINANCE_ENV === 'testnet';
+
+  if (!isTestnet) {
     const halted = await redisClient.get(REDIS_KEYS.TRADING_HALTED);
     if (halted) {
       const msg = `⛔ BUY BLOCKED [${symbol}] — trading is halted. Use /api/trading/resume to re-enable.`;
@@ -29,7 +31,7 @@ async function canTrade(symbol) {
       return false;
     }
   } else {
-    logger.info(`[RiskManager] Daily limits disabled (test mode) — halted-flag check skipped for ${symbol}`);
+    logger.info(`[RiskManager] Testnet mode — halt/limit checks skipped for ${symbol}`);
   }
 
   // Atomic concurrency lock (15s TTL).
@@ -48,15 +50,17 @@ async function canTrade(symbol) {
     return false;
   }
 
-  // Position count
-  const openTrades = await Trade.countDocuments({ status: { $in: ['PENDING', 'OPEN'] } });
-  if (openTrades >= MAX_OPEN_POSITIONS) {
-    await releaseLock();
-    logger.info(`[RiskManager] Max open positions (${MAX_OPEN_POSITIONS}) reached`);
-    return false;
+  // Position count — enforced on mainnet only
+  if (!isTestnet) {
+    const openTrades = await Trade.countDocuments({ status: { $in: ['PENDING', 'OPEN'] } });
+    if (openTrades >= MAX_OPEN_POSITIONS) {
+      await releaseLock();
+      logger.info(`[RiskManager] Max open positions (${MAX_OPEN_POSITIONS}) reached`);
+      return false;
+    }
   }
 
-  // Check symbol already has an open position
+  // Always guard: don't open a second position on the same symbol
   const posKey = REDIS_KEYS.POSITION(symbol);
   const existing = await redisClient.get(posKey);
   if (existing) {
@@ -100,9 +104,9 @@ async function recordTradePnL(pnlPct, pnlUsdt) {
   await redisClient.set(REDIS_KEYS.WEEKLY_PNL, newWeeklyPnl.toFixed(4));
 
   const maxDrawdown = -Math.abs(parseFloat(process.env.MAX_DAILY_DRAWDOWN || '2'));
-  const limitsDisabled = process.env.DISABLE_DAILY_LIMITS === 'true';
+  const isTestnet = process.env.BINANCE_ENV === 'testnet';
 
-  if (!limitsDisabled && newDailyPnl <= maxDrawdown) {
+  if (!isTestnet && newDailyPnl <= maxDrawdown) {
     // Expire the halt at UTC midnight so the bot auto-resets each day.
     // Math.max(1, ...) guards against the EX=0 edge case at exactly 00:00:00 UTC,
     // which Redis rejects as an invalid TTL.
@@ -117,11 +121,11 @@ async function recordTradePnL(pnlPct, pnlUsdt) {
       dailyPnlPct: newDailyPnl,
       timestamp: new Date().toISOString(),
     });
-  } else if (limitsDisabled && newDailyPnl <= maxDrawdown) {
-    logger.info(`[RiskManager] Daily drawdown ${newDailyPnl.toFixed(2)}% exceeded but limits are disabled (test mode) — continuing`);
+  } else if (isTestnet && newDailyPnl <= maxDrawdown) {
+    logger.info(`[RiskManager] Daily drawdown ${newDailyPnl.toFixed(2)}% exceeded but testnet mode — continuing without halt`);
   }
 
-  if (!limitsDisabled && newWeeklyPnl <= -5) {
+  if (!isTestnet && newWeeklyPnl <= -5) {
     await redisClient.set(REDIS_KEYS.WEEKLY_REVIEW_FLAG, '1');
     telegram.send(`⚠️ WEEKLY DRAWDOWN -5% — Manual review required`);
   }

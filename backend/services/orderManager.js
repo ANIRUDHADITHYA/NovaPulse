@@ -394,9 +394,12 @@ async function onBuyFilled(symbol, pos, filledPrice, filledQty) {
     binance.restPost('/api/v3/order', {
       symbol, side: 'SELL', type: 'LIMIT', timeInForce: 'GTC', quantity: filledQty, price: tpPrice,
     }),
+    // Use STOP_LOSS (market-stop) instead of STOP_LOSS_LIMIT so the SL always executes
+    // even when price gaps through the stop level. STOP_LOSS_LIMIT with price=stopPrice
+    // silently fails to fill when the market jumps past the limit in one candle.
     binance.restPost('/api/v3/order', {
-      symbol, side: 'SELL', type: 'STOP_LOSS_LIMIT', timeInForce: 'GTC',
-      quantity: filledQty, price: slPrice, stopPrice: slPrice,
+      symbol, side: 'SELL', type: 'STOP_LOSS', timeInForce: 'GTC',
+      quantity: filledQty, stopPrice: slPrice,
     }),
   ]);
 
@@ -408,8 +411,19 @@ async function onBuyFilled(symbol, pos, filledPrice, filledQty) {
     slOrderId: String(slOrder.orderId),
   };
   await redisClient.set(REDIS_KEYS.POSITION(symbol), JSON.stringify(updatedPos));
-  // Transition PENDING → OPEN now that the buy is filled and TP/SL are live
-  await Trade.updateOne({ _id: pos.tradeId }, { status: 'OPEN', entryPrice: filledPrice, tpOrderId: String(tpOrder.orderId), slOrderId: String(slOrder.orderId) });
+
+  // Transition PENDING → OPEN. Match on _id first; fall back to buyOrderId in case
+  // tradeId in the Redis position key is from a previous stale write.
+  const updateFilter = pos.tradeId
+    ? { _id: pos.tradeId }
+    : { buyOrderId: String(pos.buyOrderId), status: { $in: ['PENDING', 'OPEN'] } };
+  const updateResult = await Trade.updateOne(
+    updateFilter,
+    { status: 'OPEN', entryPrice: filledPrice, tpOrderId: String(tpOrder.orderId), slOrderId: String(slOrder.orderId) }
+  );
+  if (updateResult.matchedCount === 0) {
+    logger.error(`[OrderManager] onBuyFilled: no trade doc matched for ${symbol} tradeId=${pos.tradeId} buyOrderId=${pos.buyOrderId}`);
+  }
 
   emitter.emit('order:filled', {
     symbol,
@@ -571,6 +585,8 @@ async function reconcileOpenPositions() {
       const slFilled = slOrder?.status === 'FILLED';
       const tpCancelled = tpOrder?.status === 'CANCELED' || tpOrder?.status === 'EXPIRED';
       const slCancelled = slOrder?.status === 'CANCELED' || slOrder?.status === 'EXPIRED';
+      const tpOpen = tpOrder && !tpFilled && !tpCancelled;
+      const slOpen = slOrder && !slFilled && !slCancelled;
 
       if (tpFilled && slFilled) {
         // Race condition: both filled during downtime — close at TP (better fill), alert for manual review
@@ -598,6 +614,43 @@ async function reconcileOpenPositions() {
           } catch (_) { /* ignore */ }
         }
         resolved++;
+      } else if (tpOpen && slOpen) {
+        // TP and SL are both live — repair PENDING → OPEN in the DB if it got stuck
+        const repaired = await Trade.updateOne(
+          { $or: [{ _id: pos.tradeId }, { buyOrderId: String(pos.buyOrderId) }], status: 'PENDING' },
+          { status: 'OPEN', tpOrderId: String(pos.tpOrderId), slOrderId: String(pos.slOrderId) }
+        );
+        if (repaired.modifiedCount > 0) {
+          logger.warn(`[Reconcile] Repaired stuck PENDING → OPEN for ${symbol}`);
+          resolved++;
+        }
+
+        // Detect SL gap-through: SL order is a LIMIT sell stuck because price has
+        // already dropped below the limit price (STOP_LOSS_LIMIT edge case).
+        // If so, cancel and close at market to guarantee exit.
+        if (slOrder?.type === 'STOP_LOSS_LIMIT') {
+          try {
+            const ticker = await binance.restGet('/api/v3/ticker/price', { symbol }, 1, false);
+            const currentPrice = parseFloat(ticker.price);
+            const slLimitPrice = parseFloat(slOrder.price);
+            if (currentPrice < slLimitPrice) {
+              logger.error(
+                `[Reconcile] SL GAP-THROUGH for ${symbol}: currentPrice=${currentPrice} < slLimit=${slLimitPrice} — cancelling and market-selling`
+              );
+              telegram.send(`⚠️ SL GAP-THROUGH ${symbol} | Price:${currentPrice} < SL:${slLimitPrice} — closing at MARKET`);
+              try { await cancelOrder(symbol, pos.slOrderId); } catch (_) {}
+              try { await cancelOrder(symbol, pos.tpOrderId); } catch (_) {}
+              const marketSell = await binance.restPost('/api/v3/order', {
+                symbol, side: 'SELL', type: 'MARKET', quantity: pos.quantity,
+              }, 1);
+              const exitPrice = parseFloat(marketSell.cummulativeQuoteQty) / parseFloat(marketSell.executedQty);
+              await onSlFilled(symbol, pos, exitPrice, parseFloat(marketSell.executedQty));
+              resolved++;
+            }
+          } catch (gapErr) {
+            logger.error(`[Reconcile] SL gap-through check failed for ${symbol}: ${gapErr.message}`);
+          }
+        }
       }
     } catch (err) {
       logger.error(`[Reconcile] Error for ${symbol}: ${err.message}`);

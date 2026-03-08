@@ -253,8 +253,13 @@ function validateResponse(result, currentPrice) {
 async function analyze(symbol, candles, ind, oiData, sentimentData, layerSummary) {
   const provider = (process.env.AI_PROVIDER || '').toLowerCase();
 
-  if (!provider || (!process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY)) {
-    logger.info('[AISignal] No AI provider configured — Layer 6 abstains');
+  if (!provider) {
+    logger.warn('[AISignal] AI_PROVIDER not set — Layer 6 disabled. Set AI_PROVIDER=openai in .env');
+    return null;
+  }
+
+  if (!process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    logger.warn('[AISignal] No API key found (OPENAI_API_KEY / ANTHROPIC_API_KEY) — Layer 6 disabled');
     return null;
   }
 
