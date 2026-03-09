@@ -181,8 +181,8 @@ export default function OpenOrders({ symbol, openOrders, lastCandle = {} }) {
                     </td>
                   </tr>
 
-                  {/* TP / SL progress bar row — always shown when live price is available */}
-                  {livePrice && entry > 0 && (
+                  {/* TP / SL progress bar row — only shown when trade is OPEN (TP/SL placed) */}
+                  {livePrice && entry > 0 && o.tpOrderId && (
                     <tr>
                       <td
                         colSpan={8}
