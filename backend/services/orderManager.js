@@ -397,8 +397,11 @@ async function onBuyFilled(symbol, pos, filledPrice, filledQty) {
     // Use STOP_LOSS (market-stop) instead of STOP_LOSS_LIMIT so the SL always executes
     // even when price gaps through the stop level. STOP_LOSS_LIMIT with price=stopPrice
     // silently fails to fill when the market jumps past the limit in one candle.
+    // NOTE: STOP_LOSS (market-stop) does NOT accept timeInForce — Binance returns -1106
+    // if timeInForce is passed, which was causing onBuyFilled to throw and every trade
+    // to remain stuck in PENDING status forever.
     binance.restPost('/api/v3/order', {
-      symbol, side: 'SELL', type: 'STOP_LOSS', timeInForce: 'GTC',
+      symbol, side: 'SELL', type: 'STOP_LOSS',
       quantity: filledQty, stopPrice: slPrice,
     }),
   ]);
